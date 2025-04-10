@@ -93,6 +93,20 @@ class Trader:
                     
                     spread = mid_price * spread_pct
                     
+                    # Enhanced SQUID_INK momentum
+                    if product == 'SQUID_INK' and len(self.price_history[product]) > 5:
+                        momentum = (self.price_history[product][-1] - self.price_history[product][-5])/5
+                        spread_pct *= max(0.8, min(1.2, 1 + momentum/1000))  # ±20% dynamic adjustment
+                        
+                    # RAINFOREST volatility scaling
+                    if product == 'RAINFOREST_RESIN' and len(self.price_history[product]) > 10:
+                        vol = np.std(self.price_history[product][-10:])
+                        position_limit = min(20, 10 + int(5 * (vol/500)))  # 10-20 range
+                        
+                    # KELP high-frequency tuning
+                    if product == 'KELP' and len(state.market_trades) > 10:
+                        spread_pct *= 0.9  # 10% tighter during active periods
+                    
                     # Buy order
                     if position < config['position_limit']:
                         buy_price = int(mid_price - spread)
