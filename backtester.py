@@ -9,7 +9,7 @@ class Backtester:
         self.position = {}
         self.pnl_history = []
         self.trader_data = ""
-        self.data_dir = "round-1-island-data-bottle"
+        self.data_dir = os.path.join("round-1-island-data-bottle")  # Relative path
         from main import Trader
         self.trader = Trader()
         self.pnl = {'SQUID_INK': 0.0, 'KELP': 0.0, 'RAINFOREST_RESIN': 0.0}

@@ -3,6 +3,7 @@ from modules import TradingState, OrderDepth, Trade
 import pandas as pd
 import json
 from datetime import datetime
+import os
 
 def create_order_depth(bid_price, bid_volume, ask_price, ask_volume):
     return OrderDepth({bid_price: bid_volume}, {ask_price: ask_volume})
@@ -24,14 +25,14 @@ def create_trader_data(price_history=None, indicators=None):
 
 def load_historical_data():
     """Load historical data from CSV files"""
-    data_dir = "/Users/jaydenmoore/Downloads/round-1-island-data-bottle"
+    data_dir = os.path.join("round-1-island-data-bottle")  # Relative path
     files = ["prices_round_1_day_-1.csv", "prices_round_1_day_-2.csv", "prices_round_1_day_0.csv"]
     
     historical_data = {}
     
     for file in files:
         try:
-            df = pd.read_csv(f"{data_dir}/{file}", delimiter=";")
+            df = pd.read_csv(os.path.join(data_dir, file), delimiter=";")
             for product in ["SQUID_INK", "KELP", "RAINFOREST_RESIN"]:
                 product_df = df[df["product"] == product].copy()
                 if not product_df.empty:
