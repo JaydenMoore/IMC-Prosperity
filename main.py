@@ -1,3 +1,17 @@
+"""
+IMC Prosperity Round 1 Trading Algorithm
+
+Implements:
+1. Product-specific strategies with dynamic spreads
+2. Risk-managed position sizing
+3. Adaptive pricing based on market conditions
+
+Key Methods:
+- run(): Main trading logic
+- calculate_mid_price(): Fair value estimation
+- generate_orders(): Trade execution
+"""
+
 from datamodel import Order, TradingState, OrderDepth
 import json
 import statistics
@@ -6,7 +20,19 @@ from typing import Dict, List, Tuple
 import traceback
 
 class Trader:
+    """
+    Core trading class implementing:
+    - Position tracking
+    - Price history analysis
+    - Order generation
+    
+    Attributes:
+        position: dict[str, int] - Current holdings
+        price_history: dict[str, list] - Rolling price data
+    """
+    
     def __init__(self):
+        """Initialize trader with empty positions and price history"""
         self.position = {'SQUID_INK': 0, 'KELP': 0, 'RAINFOREST_RESIN': 0}
         self.price_history = {product: [] for product in self.position.keys()}
         self.max_drawdown = 0.10
@@ -45,6 +71,15 @@ class Trader:
         }
         
     def run(self, state: TradingState) -> Tuple[Dict[str, List[Order]], int, str]:
+        """
+        Main trading logic
+        
+        Args:
+            state: Current market state containing order books
+            
+        Returns:
+            Dictionary of product->Order[] mappings
+        """
         orders = {}
         conversions = 0
         trader_data = ""
@@ -185,6 +220,17 @@ class Trader:
         return orders, conversions, trader_data
     
     def _volatile_strategy(self, state, product, volatility):
+        """
+        Volatile strategy implementation
+        
+        Args:
+            state: Current market state
+            product: Product symbol
+            volatility: Current market volatility
+            
+        Returns:
+            List of Order objects
+        """
         print(f"[STRATEGY] Running volatile strategy for {product}")
         
         orders = []
@@ -223,6 +269,17 @@ class Trader:
         return orders
 
     def _stable_strategy(self, state, product, volatility):
+        """
+        Stable strategy implementation
+        
+        Args:
+            state: Current market state
+            product: Product symbol
+            volatility: Current market volatility
+            
+        Returns:
+            List of Order objects
+        """
         print(f"[STRATEGY] Running stable strategy for {product}")
         
         orders = []
@@ -279,12 +336,30 @@ class Trader:
         return orders
 
     def _calculate_position_size(self, volatility):
+        """
+        Calculate position size based on volatility
+        
+        Args:
+            volatility: Current market volatility
+            
+        Returns:
+            Position size
+        """
         base_size = 4
         risk_multiplier = 1 + (volatility * 5)  # Scale with volatility
         return min(int(base_size * risk_multiplier), self.position_limit)
     
     def _update_market_data(self, state, product):
-        """Update market data and return True if successful"""
+        """
+        Update market data for a given product
+        
+        Args:
+            state: Current market state
+            product: Product symbol
+            
+        Returns:
+            True if successful, False otherwise
+        """
         try:
             if not state.order_depths or product not in state.order_depths:
                 print(f"[MARKET] No order depth for {product}")
@@ -313,6 +388,15 @@ class Trader:
             return False
     
     def _calculate_volatility(self, product):
+        """
+        Calculate volatility for a given product
+        
+        Args:
+            product: Product symbol
+            
+        Returns:
+            Volatility value
+        """
         if len(self.price_history.get(product, [])) < 5:
             return 0
         returns = np.diff(self.price_history[product][-self.volatility_lookback:])/self.price_history[product][-self.volatility_lookback:-1]
@@ -321,6 +405,15 @@ class Trader:
         return vol
     
     def _calculate_trend(self, product):
+        """
+        Calculate trend for a given product
+        
+        Args:
+            product: Product symbol
+            
+        Returns:
+            Trend value
+        """
         if len(self.price_history.get(product, [])) < 10:
             return 0
         window = min(30, len(self.price_history[product]))
@@ -330,6 +423,16 @@ class Trader:
         return trend
     
     def _detect_regime(self, volatility, trend=None):
+        """
+        Detect market regime based on volatility and trend
+        
+        Args:
+            volatility: Current market volatility
+            trend: Current market trend
+            
+        Returns:
+            Regime name
+        """
         """More sophisticated regime detection considering both volatility and trend"""
         if volatility > self.regimes['volatile']['volatility']:
             return 'volatile'
@@ -340,6 +443,15 @@ class Trader:
         return 'neutral'
     
     def _check_daily_loss_limit(self, state):
+        """
+        Check daily loss limit
+        
+        Args:
+            state: Current market state
+            
+        Returns:
+            True if limit exceeded, False otherwise
+        """
         """Simplified version for testing"""
         if not hasattr(state, 'position'):
             return False
@@ -357,7 +469,16 @@ class Trader:
         return False  # Temporarily disabled
         
     def _scale_out_positions(self, position, product):
-        """Gradually reduce large positions"""
+        """
+        Scale out large positions
+        
+        Args:
+            position: Current position
+            product: Product symbol
+            
+        Returns:
+            Scaled position
+        """
         if abs(position) > self.position_limit * 0.8:
             return int(position * 0.5)  # Close half the position
         return position
