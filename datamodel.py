@@ -1,5 +1,6 @@
-from typing import Dict, List
-from modules import Order, OrderDepth, Trade, Symbol, TradingState, ProsperityEncoder
+from json import JSONEncoder
+from typing import Dict, List, Any, Optional
+from modules import Symbol
 from dataclasses import dataclass
 
 # This is a stub file with class definitions for the IMC Prosperity challenge
@@ -30,17 +31,17 @@ class Symbol:
 
 @dataclass
 class TradingState:
+    traderData: str
     timestamp: int
-    listings: Dict[str, int]
+    listings: Dict[str, Any]
     order_depths: Dict[str, OrderDepth]
     own_trades: Dict[str, List[Trade]]
     market_trades: Dict[str, List[Trade]]
     position: Dict[str, int]
-    observations: Dict[str, int]
-    traderData: str
+    observations: Dict[str, Any]
 
 class ProsperityEncoder(JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, Order):
-            return {"price": obj.price, "quantity": obj.quantity}
-        return super().default(obj)
+    def default(self, o):
+        if isinstance(o, Order) or isinstance(o, OrderDepth) or isinstance(o, Trade) or isinstance(o, TradingState):
+            return o.__dict__
+        return super().default(o)

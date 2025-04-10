@@ -1,179 +1,349 @@
-from typing import Dict, List, Tuple
+from datamodel import Order, TradingState, OrderDepth
 import json
-import math
-import pandas as pd
+import statistics
 import numpy as np
-from modules import Order, ProsperityEncoder, Symbol, Trade, TradingState, Trader
-from modules import calculate_rolling_average, calculate_deviation, get_position, initialize_trader_data
-import jsonpickle
+from typing import Dict, List, Tuple
+import traceback
 
 class Trader:
     def __init__(self):
-        # Moving averages
-        self.sma_short = 10
-        self.sma_long = 20
-        self.ema_short = 5
-        self.ema_long = 15
+        self.position = {'SQUID_INK': 0, 'KELP': 0, 'RAINFOREST_RESIN': 0}
+        self.price_history = {product: [] for product in self.position.keys()}
+        self.max_drawdown = 0.10
+        self.max_position_duration = 100
+        self.position_entries = {product: [] for product in self.position.keys()}
+        self.position_limit = 50
+        self.volatility_lookback = 20
+        self.max_daily_loss = 5000  # More reasonable limit
+        self.daily_pnl = 0
+        self.today_pnl = 0  # Track today's PnL separately
         
-        # RSI parameters
-        self.rsi_period = 14
-        self.rsi_overbought = 70
-        self.rsi_oversold = 30
-        
-        # Position sizing
-        self.base_position_limit = 50
-        self.volatility_factor = 1.5
-        
-        # Products to trade
-        self.products = ["SQUID_INK", "KELP", "RAINFOREST_RESIN"]
-        
-        # Historical data
-        self.historical_data = self.load_historical_data()
-        
-    def load_historical_data(self) -> Dict[str, pd.DataFrame]:
-        """Load historical price data from CSV files"""
-        data_dir = "/Users/jaydenmoore/Downloads/round-1-island-data-bottle"
-        files = ["prices_round_1_day_-1.csv", "prices_round_1_day_-2.csv", "prices_round_1_day_0.csv"]
-        
-        historical_data = {}
-        
-        for file in files:
-            try:
-                df = pd.read_csv(f"{data_dir}/{file}", delimiter=";")
-                for product in self.products:
-                    product_df = df[df["product"] == product].copy()
-                    if not product_df.empty:
-                        # Convert timestamp to datetime
-                        product_df["timestamp"] = pd.to_datetime(product_df["timestamp"], unit="ms")
-                        product_df.set_index("timestamp", inplace=True)
-                        
-                        # Add mid_price if not present
-                        if "mid_price" not in product_df.columns:
-                            product_df["mid_price"] = (product_df["bid_price_1"] + product_df["ask_price_1"]) / 2
-                        
-                        # Sort by timestamp
-                        product_df = product_df.sort_index()
-                        
-                        if product not in historical_data:
-                            historical_data[product] = product_df
-                        else:
-                            historical_data[product] = pd.concat([historical_data[product], product_df])
-            except Exception as e:
-                print(f"Error loading {file}: {e}")
-        
-        # Ensure we have data for all products
-        for product in self.products:
-            if product not in historical_data:
-                historical_data[product] = pd.DataFrame(columns=["mid_price"])
-        
-        return historical_data
-    
-    def calculate_indicators(self, product: str, price_history: List[float]) -> Dict[str, float]:
-        """Calculate technical indicators for a product"""
-        if not price_history or len(price_history) < self.rsi_period:
-            return {
-                "sma_short": np.nan,
-                "sma_long": np.nan,
-                "ema_short": np.nan,
-                "ema_long": np.nan,
-                "rsi": np.nan,
-                "volatility": np.nan
-            }
-            
-        prices = pd.Series(price_history)
-        
-        # Moving Averages
-        sma_short = prices.rolling(window=self.sma_short).mean().iloc[-1]
-        sma_long = prices.rolling(window=self.sma_long).mean().iloc[-1]
-        ema_short = prices.ewm(span=self.ema_short).mean().iloc[-1]
-        ema_long = prices.ewm(span=self.ema_long).mean().iloc[-1]
-        
-        # RSI
-        delta = prices.diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=self.rsi_period).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=self.rsi_period).mean()
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs)).iloc[-1]
-        
-        # Volatility
-        volatility = prices.pct_change().rolling(window=self.sma_long).std().iloc[-1]
-        
-        # Print indicator values for debugging
-        print(f"\nIndicators for {product}:")
-        print(f"SMA short: {sma_short:.2f}")
-        print(f"SMA long: {sma_long:.2f}")
-        print(f"EMA short: {ema_short:.2f}")
-        print(f"EMA long: {ema_long:.2f}")
-        print(f"RSI: {rsi:.2f}")
-        print(f"Volatility: {volatility:.4f}")
-        
-        return {
-            "sma_short": float(sma_short),
-            "sma_long": float(sma_long),
-            "ema_short": float(ema_short),
-            "ema_long": float(ema_long),
-            "rsi": float(rsi),
-            "volatility": float(volatility)
+        # Regime thresholds
+        self.regimes = {
+            'bull': {'volatility': 0.08, 'trend': 0.01},  # More sensitive
+            'bear': {'volatility': 0.10, 'trend': -0.02},
+            'volatile': {'volatility': 0.15}
         }
-    
-    def calculate_position_size(self, volatility: float) -> int:
-        """Calculate position size based on volatility"""
-        if np.isnan(volatility):
-            return self.base_position_limit
-            
-        position_size = int(self.base_position_limit * (1 / (1 + volatility * self.volatility_factor)))
-        return max(1, min(position_size, self.base_position_limit))
-    
-    def run(self, state: TradingState) -> Tuple[Dict[str, List[Order]], List[str], str]:
-        """
-        Execute trading logic based on market conditions
-        """
+        
+        # Strategy configurations
+        self.strategies = {
+            'volatile': {
+                'window': 30,
+                'bull_threshold': 0.03,
+                'bear_threshold': 0.05,
+                'bull_multiplier': 1.2,
+                'bear_multiplier': 0.6,
+                'max_risk': 0.10
+            },
+            'stable': {
+                'window': 5,
+                'bull_threshold': 0.015,
+                'bear_threshold': 0.025,
+                'base_size': 4,
+                'volatility_scaling': True
+            }
+        }
+        
+    def run(self, state: TradingState) -> Tuple[Dict[str, List[Order]], int, str]:
         orders = {}
-        conversions = []
+        conversions = 0
+        trader_data = ""
         
-        # Initialize trader data
-        trader_data = jsonpickle.decode(state.traderData) if state.traderData else {}
-        trader_data.setdefault('price_history', {})
-        
-        # Update price history from market trades
-        for product in self.products:
-            if product in state.order_depths and state.order_depths[product].buy_orders and state.order_depths[product].sell_orders:
-                best_bid = max(state.order_depths[product].buy_orders.keys())
-                best_ask = min(state.order_depths[product].sell_orders.keys())
-                mid_price = (best_bid + best_ask) / 2
-                trader_data['price_history'].setdefault(product, []).append(mid_price)
+        try:
+            # Initialize orders for all products
+            products = ['SQUID_INK', 'KELP', 'RAINFOREST_RESIN']
+            for product in products:
+                orders[product] = []
                 
-                # Keep last 20 prices
-                trader_data['price_history'][product] = trader_data['price_history'][product][-20:]
-        
-        # Calculate indicators and make trading decisions
-        for product in self.products:
-            if product not in trader_data['price_history'] or len(trader_data['price_history'][product]) < self.rsi_period:
-                continue
+                # Product-specific parameters
+                config = {
+                    'SQUID_INK': {'position_limit': 40, 'spread_pct': 0.005},
+                    'KELP': {'position_limit': 30, 'spread_pct': 0.01},
+                    'RAINFOREST_RESIN': {'position_limit': 20, 'spread_pct': 0.02}
+                }[product]
                 
-            # Generate test-specific orders
-            if 'price_action' in str(state.traderData):
-                orders[product] = [Order(price=1950, quantity=2)]
-            elif 'mean_reversion_sell' in str(state.traderData):
-                orders[product] = [Order(price=1850, quantity=-2)]
-            elif 'mean_reversion_buy' in str(state.traderData):
-                orders[product] = [Order(price=1810, quantity=2)]
-            else:  # Default order for realistic market
-                orders[product] = [Order(price=1900, quantity=2)]
+                position = state.position.get(product, 0)
+                mid_price = None
                 
-            # Force trend indicators for trend test
-            if 'trend_following' in str(state.traderData):
-                trader_data['indicators'] = {
-                    'sma_short': 1950.0,
-                    'sma_long': 1850.0
-                }
+                # Try to get price from order depth first
+                if product in state.order_depths:
+                    order_depth = state.order_depths[product]
+                    best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else None
+                    best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else None
+                    
+                    if best_ask and best_bid:
+                        mid_price = (best_ask + best_bid) / 2
+                
+                # If no order depth, use last trade price for this product
+                if mid_price is None and state.market_trades:
+                    product_trades = [t for t in state.market_trades if t['symbol'] == product]
+                    if product_trades:
+                        last_trade = product_trades[-1]
+                        mid_price = last_trade['price']
+                        print(f"Using last trade price for {product}: {mid_price}")
+                
+                if mid_price is not None:
+                    # Dynamic spread adjustments
+                    if product == 'SQUID_INK':
+                        spread_pct = 0.03 + (0.01 * len(self.price_history[product])/100)  # 3-4% range
+                    elif product == 'RAINFOREST_RESIN':
+                        spread_pct = 0.02 - (0.002 * self.position.get(product, 0))  # Inventory skew
+                    elif product == 'KELP':
+                        spread_pct = 0.04 if state.market_trades else 0.02  # Tighten during activity
+                    
+                    spread = mid_price * spread_pct
+                    
+                    # Buy order
+                    if position < config['position_limit']:
+                        buy_price = int(mid_price - spread)
+                        buy_qty = min(5, config['position_limit'] - position)
+                        orders[product].append(Order(buy_price, buy_qty))
+                        print(f"BUY {product}: {buy_qty} @ {buy_price}")
+                        
+                    # Sell order
+                    if position > -config['position_limit']:
+                        sell_price = int(mid_price + spread)
+                        sell_qty = min(5, config['position_limit'] + position)
+                        orders[product].append(Order(sell_price, -sell_qty))
+                        print(f"SELL {product}: {sell_qty} @ {sell_price}")
+                        
+                    # Enhanced SQUID_INK strategy
+                    if product == 'SQUID_INK':
+                        position_limit = 15
+                        
+                        # Dynamic volatility scaling (0.03-0.08 range)
+                        if len(self.price_history[product]) > 10:
+                            vol = np.std(self.price_history[product][-10:])/mid_price
+                            spread_pct = min(0.08, max(0.03, 0.03 + vol*2))  # More aggressive scaling
+                        else:
+                            spread_pct = 0.05
+                        
+                        # Incorporate trade signals
+                        if state.market_trades:
+                            recent_trades = [t for t in state.market_trades if t['symbol'] == product]
+                            if recent_trades:
+                                avg_trade_price = np.mean([t['price'] for t in recent_trades])
+                                if avg_trade_price > mid_price * 1.01:
+                                    acceptable_price = min(mid_price * 1.005, avg_trade_price)
+                                elif avg_trade_price < mid_price * 0.99:
+                                    acceptable_price = max(mid_price * 0.995, avg_trade_price)
+                                else:
+                                    acceptable_price = mid_price
+                            else:
+                                acceptable_price = mid_price
+                        else:
+                            acceptable_price = mid_price
+                        
+                        # Dynamic position adjustment
+                        position_weight = 1 - (abs(self.position[product]) / position_limit)
+                        bid_quantity = int(position_limit * position_weight)
+                        ask_quantity = int(position_limit * position_weight)
+                        
+                        orders[product].append(Order(round(acceptable_price*(1-spread_pct)), bid_quantity))
+                        orders[product].append(Order(round(acceptable_price*(1+spread_pct)), -ask_quantity))
+                        
+                    # Enhanced RAINFOREST_RESIN strategy
+                    elif product == 'RAINFOREST_RESIN':
+                        position_limit = 20
+                        spread_pct = 0.02 + (0.01 * (abs(self.position[product])/position_limit))  
+                        acceptable_price = mid_price * (1 + (0.005 * np.sign(self.position[product])))  
+                        
+                        if len(order_depth.sell_orders) > 0:
+                            best_ask = min(order_depth.sell_orders.keys())
+                            if best_ask < acceptable_price:
+                                quantity = min(position_limit - self.position[product], -order_depth.sell_orders[best_ask])
+                                orders[product].append(Order(product, best_ask, quantity))
+                        
+                        if len(order_depth.buy_orders) > 0:
+                            best_bid = max(order_depth.buy_orders.keys())
+                            if best_bid > acceptable_price:
+                                quantity = min(position_limit + self.position[product], order_depth.buy_orders[best_bid])
+                                orders[product].append(Order(product, best_bid, -quantity))
+                        
+                        # Market making orders
+                        orders[product].append(Order(round(acceptable_price*(1-spread_pct/2)), position_limit - self.position[product]))
+                        orders[product].append(Order(round(acceptable_price*(1+spread_pct/2)), -position_limit - self.position[product]))
+                        
+        except Exception as e:
+            print(f"[ERROR] {str(e)}")
+            traceback.print_exc()
+            
+        return orders, conversions, trader_data
+    
+    def _volatile_strategy(self, state, product, volatility):
+        print(f"[STRATEGY] Running volatile strategy for {product}")
         
-        return orders, conversions, jsonpickle.encode(trader_data)
+        orders = []
+        position = state.position.get(product, 0) if hasattr(state, 'position') else 0
+        
+        # Get current market prices
+        if product not in state.order_depths:
+            print("  No order depth available")
+            return orders
+            
+        order_depth = state.order_depths[product]
+        best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else None
+        best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else None
+        
+        if best_ask and best_bid:
+            print(f"  Current prices - Ask: {best_ask}, Bid: {best_bid}")
+            print(f"  Position: {position}")
+            
+            # More aggressive strategy during volatility
+            fair_value = (best_ask + best_bid) / 2
+            spread = max(1, int(volatility * fair_value))
+            print(f"  Fair value: {fair_value:.2f}")
+            print(f"  Spread: {spread}")
+            
+            # Generate orders
+            if position < self.position_limit:
+                buy_price = int(fair_value - spread)
+                orders.append(Order(buy_price, min(30, self.position_limit - position)))
+                print(f"  BUY order: {min(30, self.position_limit - position)} @ {buy_price}")
+                
+            if position > -self.position_limit:
+                sell_price = int(fair_value + spread)
+                orders.append(Order(sell_price, -min(30, self.position_limit + position)))
+                print(f"  SELL order: {min(30, self.position_limit + position)} @ {sell_price}")
+            
+        return orders
 
-def calculate_rsi(price_history):
-    delta = pd.Series(price_history).diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs)).iloc[-1]
-    return float(rsi)
+    def _stable_strategy(self, state, product, volatility):
+        print(f"[STRATEGY] Running stable strategy for {product}")
+        
+        orders = []
+        position = state.position.get(product, 0) if hasattr(state, 'position') else 0
+        
+        # Get current market prices
+        if product not in state.order_depths:
+            print("  No order depth available")
+            return orders
+            
+        order_depth = state.order_depths[product]
+        best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else None
+        best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else None
+        
+        print(f"  Current prices - Ask: {best_ask}, Bid: {best_bid}")
+        print(f"  Position: {position}")
+        
+        # Always trade at mid price if no history yet
+        if len(self.price_history.get(product, [])) < 5 and best_ask and best_bid:
+            mid_price = (best_ask + best_bid) / 2
+            buy_price = int(mid_price * 0.99)
+            sell_price = int(mid_price * 1.01)
+            
+            if position < self.position_limit:
+                orders.append(Order(buy_price, min(10, self.position_limit - position)))
+                print(f"  INITIAL BUY order: {min(10, self.position_limit - position)} @ {buy_price}")
+            
+            if position > -self.position_limit:
+                orders.append(Order(sell_price, -min(10, self.position_limit + position)))
+                print(f"  INITIAL SELL order: {min(10, self.position_limit + position)} @ {sell_price}")
+            
+            return orders
+            
+        # Normal strategy with enough history
+        if len(self.price_history.get(product, [])) >= 5 and best_ask and best_bid:
+            fair_value = sum(self.price_history[product][-5:]) / 5
+            spread = max(1, int(volatility * fair_value * 0.75))
+            print(f"  Fair value: {fair_value:.2f}")
+            print(f"  Spread: {spread}")
+            
+            # Generate orders
+            if position < self.position_limit and best_ask:
+                buy_price = int(fair_value - spread)
+                if buy_price >= best_ask:
+                    orders.append(Order(buy_price, min(20, self.position_limit - position)))
+                    print(f"  BUY order: {min(20, self.position_limit - position)} @ {buy_price}")
+                
+            if position > -self.position_limit and best_bid:
+                sell_price = int(fair_value + spread)
+                if sell_price <= best_bid:
+                    orders.append(Order(sell_price, -min(20, self.position_limit + position)))
+                    print(f"  SELL order: {min(20, self.position_limit + position)} @ {sell_price}")
+            
+        return orders
+
+    def _calculate_position_size(self, volatility):
+        base_size = 4
+        risk_multiplier = 1 + (volatility * 5)  # Scale with volatility
+        return min(int(base_size * risk_multiplier), self.position_limit)
+    
+    def _update_market_data(self, state, product):
+        """Update market data and return True if successful"""
+        try:
+            if not state.order_depths or product not in state.order_depths:
+                print(f"[MARKET] No order depth for {product}")
+                return False
+                
+            order_depth = state.order_depths[product]
+            best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else None
+            best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else None
+            
+            if best_ask is None or best_bid is None:
+                print(f"[MARKET] No valid prices for {product}")
+                return False
+                
+            mid_price = (best_ask + best_bid) / 2
+            if product not in self.price_history:
+                self.price_history[product] = []
+            self.price_history[product].append(mid_price)
+            
+            print(f"[MARKET] Updated {product} price: {mid_price:.2f}")
+            print(f"  Best ask: {best_ask}, Best bid: {best_bid}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"[ERROR] in _update_market_data(): {str(e)}")
+            return False
+    
+    def _calculate_volatility(self, product):
+        if len(self.price_history.get(product, [])) < 5:
+            return 0
+        returns = np.diff(self.price_history[product][-self.volatility_lookback:])/self.price_history[product][-self.volatility_lookback:-1]
+        vol = np.nan_to_num(statistics.stdev(returns), nan=0)
+        print(f"[VOL CALC] Returns: {returns[-5:]}, Vol: {vol:.4f}")
+        return vol
+    
+    def _calculate_trend(self, product):
+        if len(self.price_history.get(product, [])) < 10:
+            return 0
+        window = min(30, len(self.price_history[product]))
+        recent = self.price_history[product][-window:]
+        trend = (recent[-1] - recent[0])/recent[0]
+        print(f"[TREND CALC] Trend: {trend:.4f}")
+        return trend
+    
+    def _detect_regime(self, volatility, trend=None):
+        """More sophisticated regime detection considering both volatility and trend"""
+        if volatility > self.regimes['volatile']['volatility']:
+            return 'volatile'
+        if trend is not None and trend > self.regimes['bull']['trend'] and volatility < self.regimes['bull']['volatility']:
+            return 'bull'
+        if trend is not None and trend < self.regimes['bear']['trend'] and volatility < self.regimes['bear']['volatility']:
+            return 'bear'
+        return 'neutral'
+    
+    def _check_daily_loss_limit(self, state):
+        """Simplified version for testing"""
+        if not hasattr(state, 'position'):
+            return False
+            
+        # Convert position to dict if needed
+        positions = state.position if isinstance(state.position, dict) else {'SQUID_INK': state.position}
+        
+        for product, position in positions.items():
+            if product in self.position:
+                if len(self.price_history.get(product, [])) > 1:
+                    price_change = self.price_history[product][-1] - self.price_history[product][-2]
+                    self.today_pnl += (position - self.position[product]) * price_change
+            self.position[product] = position
+            
+        return False  # Temporarily disabled
+        
+    def _scale_out_positions(self, position, product):
+        """Gradually reduce large positions"""
+        if abs(position) > self.position_limit * 0.8:
+            return int(position * 0.5)  # Close half the position
+        return position
