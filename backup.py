@@ -5,10 +5,10 @@ import numpy as np
 class Trader:
     def __init__(self):
         self.position_limits = 20
-        self.max_volume = 10  # Increased max volume to take more risks
+        self.max_volume = 3
         self.price_history = {}
         self.mean_reversion_window = 10  # Window size for mean reversion calculation
-        self.deviation_threshold = 0.5  # Decreased deviation threshold to take more risks
+        self.deviation_threshold = 2  # Threshold for deviation from mean
 
     def run(self, state: TradingState):
         result = {}
@@ -34,30 +34,18 @@ class Trader:
                 mean_price = np.mean(self.price_history[product])
                 deviation = mid_price - mean_price
 
-                if deviation > self.deviation_threshold and position > -self.position_limits:
-                    # Sell when price is above mean and we have room to sell
-                    sell_price = int(best_ask)
+                if deviation > self.deviation_threshold:
+                    # Sell when price is above mean
+                    sell_price = int(mid_price)
                     sell_volume = min(self.position_limits + position, self.max_volume)
-                    if sell_volume > 0:
+                    if sell_price > best_bid and sell_volume > 0:
                         orders.append(Order(product, sell_price, -sell_volume))
-                elif deviation < -self.deviation_threshold and position < self.position_limits:
-                    # Buy when price is below mean and we have room to buy
-                    buy_price = int(best_bid)
+                elif deviation < -self.deviation_threshold:
+                    # Buy when price is below mean
+                    buy_price = int(mid_price)
                     buy_volume = min(self.position_limits - position, self.max_volume)
-                    if buy_volume > 0:
+                    if buy_price < best_ask and buy_volume > 0:
                         orders.append(Order(product, buy_price, buy_volume))
-
-                # Additional trading logic to take advantage of small price movements
-                if position < self.position_limits and best_ask < mean_price:
-                    buy_price = int(best_ask)
-                    buy_volume = min(self.position_limits - position, self.max_volume)
-                    if buy_volume > 0:
-                        orders.append(Order(product, buy_price, buy_volume))
-                elif position > -self.position_limits and best_bid > mean_price:
-                    sell_price = int(best_bid)
-                    sell_volume = min(self.position_limits + position, self.max_volume)
-                    if sell_volume > 0:
-                        orders.append(Order(product, sell_price, -sell_volume))
 
             result[product] = orders
 

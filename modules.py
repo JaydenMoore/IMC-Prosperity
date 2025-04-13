@@ -4,6 +4,7 @@ from json import JSONEncoder, dumps, loads
 
 @dataclass
 class Order:
+    symbol: str
     price: int
     quantity: int
 
@@ -39,7 +40,7 @@ class TradingState:
 class ProsperityEncoder(JSONEncoder):
     def default(self, obj):
         if isinstance(obj, Order):
-            return {"price": obj.price, "quantity": obj.quantity}
+            return {"symbol": obj.symbol, "price": obj.price, "quantity": obj.quantity}
         return super().default(obj)
 
 # Utility functions
@@ -85,8 +86,8 @@ def get_position(state: TradingState, product: Symbol) -> int:
     Returns:
         Current position (positive for long, negative for short)
     """
-    if state.position and product in state.position:
-        return state.position[product]
+    if state.position and product.name in state.position:
+        return state.position[product.name]
     return 0
 
 def initialize_trader_data(trader_data_str: str) -> Dict:
@@ -201,7 +202,7 @@ class Trader:
         rolling_avg = calculate_rolling_average(price_history)
         
         # Get current position
-        current_position = get_position(state, self.product)
+        current_position = get_position(state, Symbol(self.product))
         
         # Get order book for SQUID_INK
         product_orders = []
@@ -234,35 +235,35 @@ class Trader:
                 # Check stop-loss
                 if current_position > 0 and mid_price < rolling_avg * (1 - self.stop_loss_threshold):
                     print(f"Stop-loss triggered: SELL {current_position} SQUID_INK at {best_bid}")
-                    product_orders.append(Order(best_bid, -current_position))
+                    product_orders.append(Order(symbol=self.product, price=best_bid, quantity=-current_position))
                 elif current_position < 0 and mid_price > rolling_avg * (1 + self.stop_loss_threshold):
                     print(f"Stop-loss triggered: BUY {-current_position} SQUID_INK at {best_ask}")
-                    product_orders.append(Order(best_ask, -current_position))
+                    product_orders.append(Order(symbol=self.product, price=best_ask, quantity=-current_position))
                 
                 # Check profit-taking
                 elif current_position > 0 and mid_price > rolling_avg * (1 + self.profit_take_threshold):
                     print(f"Profit take triggered: SELL {current_position} SQUID_INK at {best_bid}")
-                    product_orders.append(Order(best_bid, -current_position))
+                    product_orders.append(Order(symbol=self.product, price=best_bid, quantity=-current_position))
                 elif current_position < 0 and mid_price < rolling_avg * (1 - self.profit_take_threshold):
                     print(f"Profit take triggered: BUY {-current_position} SQUID_INK at {best_ask}")
-                    product_orders.append(Order(best_ask, -current_position))
+                    product_orders.append(Order(symbol=self.product, price=best_ask, quantity=-current_position))
                 
                 # Make trading decisions based on deviation
                 elif deviation < -deviation_threshold and current_position < self.position_limit:
                     # Price is below average - BUY
                     if order_size > 0:
                         print(f"BUY {order_size} SQUID_INK at {best_ask} (below average)")
-                        product_orders.append(Order(best_ask, order_size))
+                        product_orders.append(Order(symbol=self.product, price=best_ask, quantity=order_size))
                 
                 elif deviation > deviation_threshold and current_position > -self.position_limit:
                     # Price is above average - SELL
                     if order_size > 0:
                         print(f"SELL {order_size} SQUID_INK at {best_bid} (above average)")
-                        product_orders.append(Order(best_bid, -order_size))
+                        product_orders.append(Order(symbol=self.product, price=best_bid, quantity=-order_size))
         
         # Add orders for the product
         if product_orders:
-            orders[self.product] = product_orders
+            orders[Symbol(self.product)] = product_orders
         
         # Update trader data for next iteration
         trader_data["price_history"][self.product] = price_history

@@ -1,18 +1,46 @@
+"""
+IMC Prosperity Backtester - Deterministic Version
+
+Modified to accept --trader argument for comparing different implementations
+"""
+
+import argparse
 import csv
 import os
 import traceback
+import random
 from typing import Dict, List, Tuple
 from datamodel import OrderDepth, TradingState, Order
 
+# Argument parsing
+parser = argparse.ArgumentParser(description='IMC Prosperity Backtester')
+parser.add_argument('file_path', help='Path to market data CSV file')
+parser.add_argument('--trader', default='submission', help='Trader module to use (submission or main)')
+parser.add_argument('--analyze', action='store_true', help='Enable detailed trade analysis')
+parser.add_argument('--seed', type=int, help='Random seed for deterministic testing')
+args = parser.parse_args()
+
 class Backtester:
-    def __init__(self):
+    def __init__(self, trader_module='submission'):
         self.position = {}
         self.pnl_history = []
         self.trader_data = ""
         self.data_dir = os.path.join("round-1-island-data-bottle")  # Relative path
-        from main import Trader
+        self.order_depths = {}
+        
+        # Dynamic trader import
+        if trader_module == 'main':
+            from main import Trader
+        else:
+            from submission import Trader
+            
         self.trader = Trader()
         self.pnl = {'SQUID_INK': 0.0, 'KELP': 0.0, 'RAINFOREST_RESIN': 0.0}
+        
+        if args.seed:
+            random.seed(args.seed)
+            import numpy as np
+            np.random.seed(args.seed)
 
     def run_csv_backtest(self, file_path: str):
         try:
@@ -20,70 +48,49 @@ class Backtester:
             products = ['SQUID_INK', 'KELP', 'RAINFOREST_RESIN']
             self.position = {product: 0 for product in products}
             self.pnl = {product: 0.0 for product in products}
+            trader_data = ""
             
-            is_prices_file = 'prices' in file_path.lower()
-            
-            with open(file_path, 'r') as f:
+            with open(file_path) as f:
                 reader = csv.reader(f, delimiter=';')
-                headers = [h.strip().lower() for h in next(reader)]
-                
                 for row in reader:
-                    if is_prices_file:
-                        if len(row) < 16:  # Skip incomplete rows in prices file
-                            continue
-                            
-                        timestamp = int(row[1])
-                        product = row[2]
-                        bid_price = float(row[3]) if row[3] else None
-                        ask_price = float(row[9]) if row[9] else None
-                        
-                        if bid_price and ask_price:
-                            state = TradingState(
-                                timestamp=timestamp,
-                                listings={},
-                                order_depths={
-                                    product: OrderDepth(
-                                        buy_orders={int(bid_price): 1},
-                                        sell_orders={int(ask_price): 1}
-                                    )
-                                },
-                                position=self.position.copy(),
-                                observations={},
-                                traderData="",
-                                own_trades={},
-                                market_trades={}
-                            )
-                    else:
-                        # Process trades file
-                        if len(row) < 6:  # Skip incomplete rows in trades file
+                    try:
+                        # Handle competition CSV format with validation
+                        if len(row) < 6 or not row[5].strip():
                             continue
                             
                         timestamp = int(row[0])
-                        product = row[3]
-                        price = float(row[5])
-                        quantity = int(row[6])
+                        product = row[2]
+                        price = float(row[5]) if row[5].strip() else 0
+                        quantity = int(row[3])
                         
-                        state = TradingState(
-                            timestamp=timestamp,
-                            listings={},
-                            order_depths={product: OrderDepth(buy_orders={}, sell_orders={})},
-                            position=self.position.copy(),
-                            observations={},
-                            traderData="",
-                            own_trades={},
-                            market_trades=[{
-                                'symbol': product,
-                                'price': price,
-                                'quantity': quantity,
-                                'buyer': row[1],
-                                'seller': row[2]
-                            }]
-                        )
+                        if product not in self.order_depths:
+                            self.order_depths[product] = OrderDepth()
+                        
+                        if quantity > 0:  # Buy order
+                            if price in self.order_depths[product].buy_orders:
+                                self.order_depths[product].buy_orders[price] += quantity
+                            else:
+                                self.order_depths[product].buy_orders[price] = quantity
+                        else:  # Sell order
+                            if price in self.order_depths[product].sell_orders:
+                                self.order_depths[product].sell_orders[price] += abs(quantity)
+                            else:
+                                self.order_depths[product].sell_orders[price] = abs(quantity)
+                    except Exception as e:
+                        print(f"Skipping malformed row: {row}")
+                        continue
                     
-                    # Print trade details for verification
-                    if not is_prices_file:
-                        print(f"Processing trade: {product} {quantity} @ {price}")
-                
+                    state = TradingState(
+                        timestamp=timestamp,
+                        listings={},
+                        order_depths=self.order_depths,
+                        position=self.position.copy(),
+                        observations={},
+                        traderData=trader_data,
+                        own_trades={},
+                        market_trades=[]
+                    )
+                    
                     # Run trader logic
                     orders, conversions, trader_data = self.trader.run(state)
                     
@@ -101,7 +108,7 @@ class Backtester:
                                 self.pnl[product] -= abs(order.quantity) * order.price
                             else:  # Sell
                                 self.pnl[product] += abs(order.quantity) * order.price
-                                
+                
             print('\n=== BACKTEST RESULTS ===')
             print(f'Final Positions: {self.position}')
             print(f'Final P&L:')
@@ -116,13 +123,7 @@ class Backtester:
             traceback.print_exc()
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("file_path", help="Path to CSV file")
-    parser.add_argument("--analyze", action="store_true", help="Generate trade analytics")
-    args = parser.parse_args()
-
-    backtester = Backtester()
+    backtester = Backtester(args.trader)
     if args.analyze:
         import pandas as pd
         import numpy as np
