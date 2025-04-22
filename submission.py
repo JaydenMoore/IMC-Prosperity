@@ -20,12 +20,6 @@ class Trader:
                      "DJEMBES": 60,
                      "PICNIC_BASKET1": 60,
                      "PICNIC_BASKET2": 100,
-                     "VOLCANIC_ROCK": 400,
-                     "VOLCANIC_ROCK_VOUCHER_9500": 200,
-                     "VOLCANIC_ROCK_VOUCHER_9750": 200,
-                     "VOLCANIC_ROCK_VOUCHER_10000": 200,
-                     "VOLCANIC_ROCK_VOUCHER_10250": 200,
-                     "VOLCANIC_ROCK_VOUCHER_10500": 200,
                  },
                  max_volume: Dict[str, int] = { # Product-specific max order volumes
                      "RAINFOREST_RESIN": 20,
@@ -36,12 +30,6 @@ class Trader:
                      "DJEMBES": 30,
                      "PICNIC_BASKET1": 30,
                      "PICNIC_BASKET2": 50,
-                     "VOLCANIC_ROCK": 150,
-                     "VOLCANIC_ROCK_VOUCHER_9500": 50,
-                     "VOLCANIC_ROCK_VOUCHER_9750": 50,
-                     "VOLCANIC_ROCK_VOUCHER_10000": 50,
-                     "VOLCANIC_ROCK_VOUCHER_10250": 50,
-                     "VOLCANIC_ROCK_VOUCHER_10500": 50,
                  },
                  arb_margin: float = 150.0,        # Minimum profit threshold for GIFT_BASKET arbitrage. Adjusted based on typical spreads.
                  dead_zone: float = 0.5,           # Default minimum absolute difference required between the current mid-price and the estimated fair value to consider placing a trade. Helps filter out noise.
@@ -724,147 +712,6 @@ class Trader:
 
         return orders
 
-    def _handle_volcanic_rock_vouchers(self, state: TradingState) -> Dict[str, List[Order]]:
-        """
-        Handle trading for VOLCANIC_ROCK_VOUCHER products.
-        
-        These are vouchers with:
-        - Position Limit: 200 each
-        - Strike Prices: 9500, 9750, 10000, 10250, 10500
-        - Expiration: 7 days from round 1
-        """
-        result = {}
-        voucher_products = [
-            "VOLCANIC_ROCK_VOUCHER_9500",
-            "VOLCANIC_ROCK_VOUCHER_9750", 
-            "VOLCANIC_ROCK_VOUCHER_10000",
-            "VOLCANIC_ROCK_VOUCHER_10250", 
-            "VOLCANIC_ROCK_VOUCHER_10500"
-        ]
-        
-        # The underlying asset
-        underlying = "VOLCANIC_ROCK"
-        
-        # Strike prices for each voucher
-        strike_prices = {
-            "VOLCANIC_ROCK_VOUCHER_9500": 9500,
-            "VOLCANIC_ROCK_VOUCHER_9750": 9750,
-            "VOLCANIC_ROCK_VOUCHER_10000": 10000,
-            "VOLCANIC_ROCK_VOUCHER_10250": 10250,
-            "VOLCANIC_ROCK_VOUCHER_10500": 10500
-        }
-        
-        # Skip if underlying asset's order depth is not available
-        if underlying not in state.order_depths:
-            return result
-            
-        # Get current price of the underlying asset (VOLCANIC_ROCK)
-        underlying_bid, underlying_ask = self._get_best_bid_ask(underlying, state.order_depths[underlying])
-        if underlying_bid is None or underlying_ask is None:
-            return result
-            
-        underlying_mid = (underlying_bid + underlying_ask) / 2
-        
-        # Current day (round number)
-        current_day = state.timestamp // 1000000  # Assuming timestamp format gives day
-        days_to_expiry = max(0, 7 - current_day)  # Vouchers expire after 7 days
-        
-        # Skip trading if expired
-        if days_to_expiry <= 0:
-            return result
-            
-        # Time decay factor - vouchers lose value as they approach expiration
-        time_value_factor = days_to_expiry / 7.0
-        
-        for voucher in voucher_products:
-            if voucher not in state.order_depths:
-                continue
-                
-            orders = []
-            position = state.position.get(voucher, 0)
-            pos_limit = self.position_limit.get(voucher, 200)
-            strike = strike_prices[voucher]
-            
-            # Skip if order book is empty
-            if not state.order_depths[voucher].buy_orders and not state.order_depths[voucher].sell_orders:
-                result[voucher] = []
-                continue
-                
-            # Get market prices for the voucher
-            voucher_bid, voucher_ask = self._get_best_bid_ask(voucher, state.order_depths[voucher])
-            if voucher_bid is None or voucher_ask is None:
-                result[voucher] = []
-                continue
-                
-            # Calculate intrinsic value (what the voucher is worth at expiration)
-            # For long positions: max(0, underlying_price - strike_price)
-            intrinsic_value = max(0, underlying_mid - strike)
-            
-            # Add time value - vouchers have more value when there's more time to expiry
-            # This is a simplified model, real options have more complex pricing
-            volatility_estimate = self.update_volatility(underlying, self.ma_length) or 100  # Default to 100 if no data
-            time_value = volatility_estimate * time_value_factor * 0.1  # Simple heuristic
-            
-            # Estimated fair value
-            fair_value = intrinsic_value + time_value
-            
-            # Trading logic based on fair value vs market price
-            # If market price < fair value, BUY
-            # If market price > fair value, SELL
-            
-            # Margin of safety
-            safety_margin = max(5, volatility_estimate * 0.05)
-            
-            # BUY signal
-            if voucher_ask < fair_value - safety_margin:
-                # Available buy volume considering position limit
-                available_buy = pos_limit - position
-                if available_buy > 0:
-                    max_vol = min(available_buy, self.max_volume.get(voucher, 50))
-                    avail_liquidity = -state.order_depths[voucher].sell_orders.get(voucher_ask, 0)
-                    buy_vol = min(max_vol, avail_liquidity)
-                    
-                    if buy_vol > 0:
-                        orders.append(Order(voucher, voucher_ask, buy_vol))
-                        print(f"BUY {voucher}: {buy_vol}@{voucher_ask} (Fair: {fair_value:.2f}, Days: {days_to_expiry})")
-            
-            # SELL signal
-            if voucher_bid > fair_value + safety_margin:
-                # Available sell volume considering position limit
-                available_sell = pos_limit + position
-                if available_sell > 0:
-                    max_vol = min(available_sell, self.max_volume.get(voucher, 50))
-                    avail_liquidity = state.order_depths[voucher].buy_orders.get(voucher_bid, 0)
-                    sell_vol = min(max_vol, avail_liquidity)
-                    
-                    if sell_vol > 0:
-                        orders.append(Order(voucher, voucher_bid, -sell_vol))
-                        print(f"SELL {voucher}: {sell_vol}@{voucher_bid} (Fair: {fair_value:.2f}, Days: {days_to_expiry})")
-            
-            # Also consider market making around fair value if we haven't placed directional trades
-            if not orders and days_to_expiry >= 3:  # Only market make if not close to expiry
-                spread = max(2, int(volatility_estimate * 0.1))
-                
-                # Passive buy below fair value
-                if position < pos_limit * 0.5:  # Not too heavily long
-                    buy_price = max(1, int(fair_value - spread))
-                    if buy_price < voucher_ask and (voucher_bid is None or buy_price > voucher_bid):
-                        buy_vol = min(pos_limit - position, self.max_volume.get(voucher, 50) // 2)
-                        if buy_vol > 0:
-                            orders.append(Order(voucher, buy_price, buy_vol))
-                
-                # Passive sell above fair value
-                if position > -pos_limit * 0.5:  # Not too heavily short
-                    sell_price = int(fair_value + spread)
-                    if sell_price > voucher_bid and (voucher_ask is None or sell_price < voucher_ask):
-                        sell_vol = min(pos_limit + position, self.max_volume.get(voucher, 50) // 2)
-                        if sell_vol > 0:
-                            orders.append(Order(voucher, sell_price, -sell_vol))
-            
-            result[voucher] = orders
-            
-        return result
-
     def run(self, state: TradingState) -> Tuple[Dict[str, List[Order]], int, str]:
         """Main trading logic loop."""
         result: Dict[str, List[Order]] = {}
@@ -892,16 +739,22 @@ class Trader:
                 result[order.symbol] = []
             result[order.symbol].append(order)
 
-        # --- Handle Volcanic Rock Vouchers ---
-        volcanic_voucher_orders = self._handle_volcanic_rock_vouchers(state)
-        for product, orders in volcanic_voucher_orders.items():
-            if product not in result:
-                result[product] = []
-            result[product].extend(orders)
-
         # --- Handle Other Products ---
         products_in_arb = {"PICNIC_BASKET1", "PICNIC_BASKET2", "CROISSANTS", "JAMS", "DJEMBES"}
+        volcanic_products = {
+            "VOLCANIC_ROCK",
+            "VOLCANIC_ROCK_VOUCHER_9500",
+            "VOLCANIC_ROCK_VOUCHER_9750",
+            "VOLCANIC_ROCK_VOUCHER_10000",
+            "VOLCANIC_ROCK_VOUCHER_10250",
+            "VOLCANIC_ROCK_VOUCHER_10500"
+        }
         for product, order_depth in state.order_depths.items():
+            # Skip volcanic rock and its vouchers
+            if product in volcanic_products:
+                print(f"Skipping trading for {product}.")
+                continue
+
             # Skip products already handled by arbitrage logic
             if product in products_in_arb:
                 # Ensure the product key exists in the result even if no new orders were added
